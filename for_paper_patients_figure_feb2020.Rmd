@@ -1,0 +1,566 @@
+---
+title: "Analysis for Monthly hospitalizaions (Figure)"
+subtitle: "with Dr.Tashiro and Dr.Endo"
+author: "Shuntaro Sato"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  minidown::mini_document:
+    framework: sakura
+    theme: default
+    toc: true
+    toc_float: true
+    toc_highlight: true
+    number_section: true
+    code_folding:
+      source: hide
+      output: show
+      message: hide
+      warning: hide
+      error: hide
+---
+
+    
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = FALSE)
+
+library(pacman)
+pacman::p_load(tidyverse, tidylog, gtsummary, gt, tibbletime, lubridate, here, flextable,
+               tsModel,    # harmonic function
+               forecast,    # check residuals
+               scales
+               )
+here::i_am("Script/for_paper/for_paper_patients_figure_feb2020.Rmd")
+```
+
+# Import data
+
+```{r import}
+dbl01 <- 
+  # read_rds("data_long_for_paper_211114.rds") %>%
+  read_rds(here("Script", "for_paper", "data_long_for_paper_220311.rds")) %>%
+  as_tbl_time(index = date_hospitalization) %>%
+  filter(agecat %in% c("18 <= age <= 64", "age >= 65")) %>%
+  filter(disease %in% c("Pneumonia", "Pneumococcal pneumonia", "Aspiration pneumonia",
+                        "Influenza pneumonia", "Pyelonephritis", "Biliary tract infections")) %>%
+  mutate(agecat = fct_drop(agecat),
+         disease = fct_drop(disease))
+```
+
+
+
+# Results
+
+## Impact of behavior change on each infection
+
+```{r}
+# Create data
+dbl02 <- dbl01 %>%
+  filter(disease %in% c("Pneumonia", "Pyelonephritis", "Biliary tract infections")) %>%
+  distinct(HospDmyCd, PtDmyCd, nyuseqno, ym, .keep_all=TRUE)
+
+dbl03 <- dbl02 %>%
+  group_by(disease, date_hospitalization) %>%
+  summarise(n = sum(onset), .groups = "drop") %>%
+  mutate(n = if_else(is.na(n) == TRUE, 0, n)) %>%
+  group_by(disease) %>%
+  arrange(disease, date_hospitalization) %>%
+  mutate(
+    time = 0:(length(n) - 1),
+    cut2 = if_else(date_hospitalization < as.Date("2020-02-01"), 0, 1),
+    time_after_cut2 = if_else(date_hospitalization <= as.Date("2020-02-01"), 0, month(date_hospitalization) - 2),
+    cut3 = if_else(date_hospitalization < as.Date("2020-03-01"), 0, 1),
+    time_after_cut3 = if_else(date_hospitalization <= as.Date("2020-03-01"), 0, month(date_hospitalization) - 3),
+    cut4 = if_else(date_hospitalization < as.Date("2020-04-01"), 0, 1),
+    time_after_cut4 = if_else(date_hospitalization <= as.Date("2020-04-01"), 0, month(date_hospitalization) - 4),
+    feb = if_else(month(date_hospitalization) == 2, 1, 0),
+    log_n = log(n)    # for change rate
+    ) %>%
+  ungroup()
+```
+
+### Change rate level: the number of hospitalized patients
+```{r}
+# Segmented regression analysis
+
+model_log2 <- dbl03 %>%
+  group_nest(disease) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut2 + time_after_cut2 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+```
+
+
+
+#### February 2020.
+```{r}
+model_log2 %>%
+  select(disease, result) %>%
+  unnest(cols = result) %>%
+  select(disease, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut2")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Disease", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+
+
+```{r fig.width = 6, fig.asp = 0.5, out.width = "70%", fig.align = 'center'}
+# Create fitted data and counterfactual data
+predict_sra <- model_log2 %>%
+  mutate(
+    preds = map2(model, data, ~ predict(.x, newdata = .y, interval = "confidence") %>%
+                   as_tibble() %>%
+                   rename(y_pred = fit,
+                          y_pred_l = lwr,
+                          y_pred_u = upr)
+                 )
+    ) %>%
+  mutate(
+    cf.data = data,
+    cf.data = map(data, ~ .x %>%
+      mutate(
+        cut2 = 0,
+        time_after_cut2 = 0
+      )),
+    cf = map2(model, cf.data, ~ predict(.x, newdata = .y, interval = "confidence") %>%
+                as_tibble() %>%
+                rename(y_cf = fit,
+                       y_cf_l = lwr,
+                       y_cf_u = upr))
+    ) %>%
+  mutate(
+    predict_data = pmap(list(data, preds, cf), ~ ..1 %>%
+      bind_cols(preds = ..2, cf = ..3) %>%
+      mutate(y_pred_l = if_else(cut2 == 0, NA_real_, y_pred_l),
+         y_pred_u = if_else(cut2 == 0, NA_real_, y_pred_u),
+         y_cf_l = if_else(cut2 == 0, NA_real_, y_cf_l),
+         y_cf_u = if_else(cut2 == 0, NA_real_, y_cf_u))
+    )
+  ) %>%
+  mutate(
+    predict_data = map(predict_data, ~ .x %>%
+                         filter(date_hospitalization >= as.Date("2018-01-01"))
+                       )
+  )
+
+
+predict_plot <- function(pred.data, vars1) {
+  plot <- pred.data %>%
+    ggplot() +
+    aes(x = date_hospitalization) +
+    annotate("rect", xmin = as.Date("2020-02-01"), xmax = as.Date("2020-08-01"), ymin = 0, ymax = Inf,
+             alpha = 0.4, fill = "gray") +
+    geom_point(aes(y = n), color = "#0099b4", alpha = 0.5) +
+    geom_line(aes(y = exp(y_cf)), color = "#ed0000", linetype = "dashed") +
+    geom_ribbon(aes(ymin = exp(y_cf_l),
+                    ymax = exp(y_cf_u)), alpha = 0.3, fill = "#ed0000") +
+    geom_line(aes(y = exp(y_pred)), color = "#00468b") +
+    geom_ribbon(aes(ymin = exp(y_pred_l),
+                    ymax = exp(y_pred_u)), alpha = 0.3, fill = "#00468b") +
+    labs(title = vars1) +
+    scale_y_continuous(
+      name = "Monthly hospitalizations",
+      labels = number_format()
+      ) +
+    scale_x_date(breaks = seq(as.Date("2015-01-01"), as.Date("2020-07-01"), by = "3 month"),
+                 labels = date_format("%Y-%m")) +
+    theme_bw() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),
+      legend.position = "bottom"
+    ) +
+    guides(fill = guide_legend(title = NULL))
+  
+  return(plot)
+}
+
+arguments <- list(
+  pred.data = predict_sra$predict_data,
+  vars1 = c(
+    "Pneumonia",
+    "Pyelonephritis",
+    "Biliary tract infections"
+  )
+)
+
+plots <- pmap(arguments, predict_plot)
+
+plots[[1]]
+plots[[2]]
+plots[[3]]
+
+ggsave(here("Script", "for_paper", "figure", "Pneumonia.pdf"), plot = plots[[1]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Pyelonephritis.pdf"), plot = plots[[2]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Biliary _tract_infections.pdf"), plot = plots[[3]], dpi = 300, width = 6, height = 6*0.5)
+```
+
+
+
+
+## Impact of behavior change on pneumonia stratified by age
+```{r}
+# Create data
+dbl02 <- dbl01 %>%
+  filter(disease %in% c("Pneumonia")) %>%
+  distinct(HospDmyCd, PtDmyCd, nyuseqno, ym, .keep_all=TRUE)
+
+dbl03 <- dbl02 %>%
+  group_by(agecat, date_hospitalization) %>%
+  summarise(n = sum(onset),
+            n_death_30 = sum(death_30, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(n = if_else(is.na(n) == TRUE, 0, n),
+         n_death_30 = if_else(is.na(n_death_30) == TRUE, 0, n_death_30)) %>%
+  group_by(agecat) %>%
+  arrange(agecat, date_hospitalization) %>%
+  mutate(
+    time = 0:(length(n) - 1),
+    cut2 = if_else(date_hospitalization < as.Date("2020-02-01"), 0, 1),
+    time_after_cut2 = if_else(date_hospitalization <= as.Date("2020-02-01"), 0, month(date_hospitalization) - 2),
+    cut3 = if_else(date_hospitalization < as.Date("2020-03-01"), 0, 1),
+    time_after_cut3 = if_else(date_hospitalization <= as.Date("2020-03-01"), 0, month(date_hospitalization) - 3),
+    cut4 = if_else(date_hospitalization < as.Date("2020-04-01"), 0, 1),
+    time_after_cut4 = if_else(date_hospitalization <= as.Date("2020-04-01"), 0, month(date_hospitalization) - 4),
+    feb = if_else(month(date_hospitalization) == 2, 1, 0),
+    log_n = log(n),    # for change rate
+    log_n_death_30 = log(n_death_30),
+    prop_death_30 = log((n_death_30/n) * 100)
+    ) %>%
+  ungroup()
+```
+
+### Change rate level: the number of hospitalized patients
+```{r}
+# Segmented regression analysis
+model_log2 <- dbl03 %>%
+  group_nest(agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut2 + time_after_cut2 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+```
+
+#### February 2020
+```{r}
+model_log2 %>%
+  select(agecat, result) %>%
+  unnest(cols = result) %>%
+  select(agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut2")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+
+
+```{r fig.width = 6, fig.asp = 0.5, out.width = "70%", fig.align = 'center'}
+# Create fitted data and counterfactual data
+predict_sra <- model_log2 %>%
+  mutate(
+    preds = map2(model, data, ~ predict(.x, newdata = .y, interval = "confidence") %>%
+                   as_tibble() %>%
+                   rename(y_pred = fit,
+                          y_pred_l = lwr,
+                          y_pred_u = upr)
+                 )
+    ) %>%
+  mutate(
+    cf.data = data,
+    cf.data = map(data, ~ .x %>%
+      mutate(
+        cut2 = 0,
+        time_after_cut2 = 0
+      )),
+    cf = map2(model, cf.data, ~ predict(.x, newdata = .y, interval = "confidence") %>%
+                as_tibble() %>%
+                rename(y_cf = fit,
+                       y_cf_l = lwr,
+                       y_cf_u = upr))
+    ) %>%
+  mutate(
+    predict_data = pmap(list(data, preds, cf), ~ ..1 %>%
+      bind_cols(preds = ..2, cf = ..3) %>%
+      mutate(y_pred_l = if_else(cut2 == 0, NA_real_, y_pred_l),
+         y_pred_u = if_else(cut2 == 0, NA_real_, y_pred_u),
+         y_cf_l = if_else(cut2 == 0, NA_real_, y_cf_l),
+         y_cf_u = if_else(cut2 == 0, NA_real_, y_cf_u))
+    )
+  ) %>%
+  mutate(
+    predict_data = map(predict_data, ~ .x %>%
+                         filter(date_hospitalization >= as.Date("2018-01-01"))
+                       )
+  )
+
+
+predict_plot <- function(pred.data, vars1) {
+  plot <- pred.data %>%
+    ggplot() +
+    aes(x = date_hospitalization) +
+    annotate("rect", xmin = as.Date("2020-02-01"), xmax = as.Date("2020-08-01"), ymin = 0, ymax = Inf,
+             alpha = 0.4, fill = "gray") +
+    geom_point(aes(y = n), color = "#0099b4", alpha = 0.5) +
+    geom_line(aes(y = exp(y_cf)), color = "#ed0000", linetype = "dashed") +
+    geom_ribbon(aes(ymin = exp(y_cf_l),
+                    ymax = exp(y_cf_u)), alpha = 0.3, fill = "#ed0000") +
+    geom_line(aes(y = exp(y_pred)), color = "#00468b") +
+    geom_ribbon(aes(ymin = exp(y_pred_l),
+                    ymax = exp(y_pred_u)), alpha = 0.3, fill = "#00468b") +
+    labs(title = "Pneumonia",
+         subtitle = vars1) +
+    scale_y_continuous(
+      name = "Monthly hospitalizations",
+      labels = number_format()
+      ) +
+    scale_x_date(breaks = seq(as.Date("2015-01-01"), as.Date("2020-07-01"), by = "3 month"),
+                 labels = date_format("%Y-%m")) +
+    theme_bw() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),
+      legend.position = "bottom"
+    ) +
+    guides(fill = guide_legend(title = NULL))
+  
+  return(plot)
+}
+
+arguments <- list(
+  pred.data = predict_sra$predict_data,
+  vars1 = c(
+    "Age 18 to 64",
+    "Age 65 and over"
+  )
+)
+
+plots <- pmap(arguments, predict_plot)
+
+plots[[1]]
+plots[[2]]
+
+ggsave(here("Script", "for_paper", "figure", "Pneumonia_n_18to64_feb.pdf"), plot = plots[[1]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Pneumonia_n_65_feb.pdf"), plot = plots[[2]], dpi = 300, width = 6, height = 6*0.5)
+```
+
+
+## Impact of behavior change on different type of pneumonia stratified by age
+
+```{r}
+# ダミーデータ作成
+disease <- fct_relevel(
+  c(
+    "Pneumococcal pneumonia",
+    "Aspiration pneumonia",
+    "Influenza pneumonia"
+  ),
+  "Pneumococcal pneumonia",
+  "Aspiration pneumonia",
+  "Influenza pneumonia"
+)
+date_hospitalization <- seq(from = as.Date("2015-04-01"), to = as.Date("2020-08-01"), by = "month")
+
+agecat <- fct_relevel(c("18 <= age <= 64", "age >= 65"), "18 <= age <= 64", "age >= 65")
+
+temp <- as_tibble(expand.grid(
+  disease = disease,
+  date_hospitalization = date_hospitalization,
+  agecat = agecat
+)) %>%
+  as_tbl_time(index = date_hospitalization)
+
+
+# Create data
+dbl02 <- dbl01 %>%
+  filter(disease %in% c("Pneumococcal pneumonia",
+                        "Aspiration pneumonia",
+                        "Influenza pneumonia")) %>%
+  filter(agecat %in% c("18 <= age <= 64", "age >= 65"))
+
+dbl03 <- dbl02 %>%
+  group_by(disease, agecat, date_hospitalization) %>%
+  summarise(n = sum(onset),
+            n_death_30 = sum(death_30, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(n = if_else(is.na(n) == TRUE, 0, n),
+         n_death_30 = if_else(is.na(n_death_30) == TRUE, 0, n_death_30)) %>%
+  right_join(temp, by = c("disease", "agecat", "date_hospitalization")) %>%
+  group_by(disease, agecat) %>%
+  arrange(disease, agecat, date_hospitalization) %>%
+  filter(!disease %in% c("Healthcare-associated pneumonia", "Community-acquired pneumonia") | (!date_hospitalization >= as.Date("2015-04-01") | !date_hospitalization <= as.Date("2018-03-01"))) %>%
+  mutate(
+    time = 0:(length(n) - 1),
+    cut2 = if_else(date_hospitalization < as.Date("2020-02-01"), 0, 1),
+    time_after_cut2 = if_else(date_hospitalization <= as.Date("2020-02-01"), 0, month(date_hospitalization) - 2),
+    cut3 = if_else(date_hospitalization < as.Date("2020-03-01"), 0, 1),
+    time_after_cut3 = if_else(date_hospitalization <= as.Date("2020-03-01"), 0, month(date_hospitalization) - 3),
+    cut4 = if_else(date_hospitalization < as.Date("2020-04-01"), 0, 1),
+    time_after_cut4 = if_else(date_hospitalization <= as.Date("2020-04-01"), 0, month(date_hospitalization) - 4),
+    feb = if_else(month(date_hospitalization) == 2, 1, 0),
+    log_n = if_else(is.na(n) == TRUE, log(1), log(n)),    # for change rate
+    n_death_30 = if_else(is.na(n_death_30) == TRUE, 0, n_death_30)
+    ) %>%
+  ungroup()
+```
+
+### Change rate level: the number of hospitalized patients
+```{r}
+# Segmented regression analysis
+model_log2 <- dbl03 %>%
+  group_nest(disease, agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut2 + time_after_cut2 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+```
+
+
+#### February 2020.
+```{r}
+model_log2 %>%
+  select(disease, agecat, result) %>%
+  unnest(cols = result) %>%
+  select(disease, agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut2")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  arrange(agecat, disease) %>%
+  knitr::kable("simple",
+    digits = c(0, 0, 1, 1, 1, 5),
+    col.names = c("Disease", "Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+
+```{r fig.width = 6, fig.asp = 0.5, out.width = "70%", fig.align = 'center'}
+# Create fitted data and counterfactual data
+predict_sra <- model_log2 %>%
+  mutate(
+    preds = map2(model, data, ~ predict(.x, newdata = .y, interval = "confidence") %>%
+                   as_tibble() %>%
+                   rename(y_pred = fit,
+                          y_pred_l = lwr,
+                          y_pred_u = upr)
+                 )
+    ) %>%
+  mutate(
+    cf.data = data,
+    cf.data = map(data, ~ .x %>%
+      mutate(
+        cut2 = 0,
+        time_after_cut2 = 0
+      )),
+    cf = map2(model, cf.data, ~ predict(.x, newdata = .y, interval = "confidence") %>%
+                as_tibble() %>%
+                rename(y_cf = fit,
+                       y_cf_l = lwr,
+                       y_cf_u = upr))
+    ) %>%
+  mutate(
+    predict_data = pmap(list(data, preds, cf), ~ ..1 %>%
+      bind_cols(preds = ..2, cf = ..3) %>%
+      mutate(y_pred_l = if_else(cut2 == 0, NA_real_, y_pred_l),
+         y_pred_u = if_else(cut2 == 0, NA_real_, y_pred_u),
+         y_cf_l = if_else(cut2 == 0, NA_real_, y_cf_l),
+         y_cf_u = if_else(cut2 == 0, NA_real_, y_cf_u))
+    )
+  ) %>%
+  mutate(
+    predict_data = map(predict_data, ~ .x %>%
+                         filter(date_hospitalization >= as.Date("2018-01-01"))
+                       )
+  )
+
+
+predict_plot <- function(pred.data, vars1, vars2) {
+  plot <- pred.data %>%
+    ggplot() +
+    aes(x = date_hospitalization) +
+    annotate("rect", xmin = as.Date("2020-02-01"), xmax = as.Date("2020-08-01"), ymin = 0, ymax = Inf,
+             alpha = 0.4, fill = "gray") +
+    geom_point(aes(y = n), color = "#0099b4", alpha = 0.5) +
+    geom_line(aes(y = exp(y_cf)), color = "#ed0000", linetype = "dashed") +
+    geom_ribbon(aes(ymin = exp(y_cf_l),
+                    ymax = exp(y_cf_u)), alpha = 0.3, fill = "#ed0000") +
+    geom_line(aes(y = exp(y_pred)), color = "#00468b") +
+    geom_ribbon(aes(ymin = exp(y_pred_l),
+                    ymax = exp(y_pred_u)), alpha = 0.3, fill = "#00468b") +
+    labs(title = vars1,
+         subtitle = vars2) +
+    scale_y_continuous(
+      name = "Monthly hospitalizations",
+      labels = number_format()
+      ) +
+    scale_x_date(breaks = seq(as.Date("2015-01-01"), as.Date("2020-07-01"), by = "3 month"),
+                 labels = date_format("%Y-%m")) +
+    theme_bw() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),
+      legend.position = "bottom"
+    ) +
+    guides(fill = guide_legend(title = NULL))
+  
+  return(plot)
+}
+
+arguments <- list(
+  pred.data = predict_sra$predict_data,
+  vars1 = c(
+    "Pneumococcal pneumonia", "Pneumococcal pneumonia",
+    "Aspiration pneumonia", "Aspiration pneumonia",
+    "Influenza pneumonia", "Influenza pneumonia"
+  ),
+  vars2 = rep(c(
+    "Age 18 to 64",
+    "Age 65 and over"
+  ), 3)
+)
+
+plots <- pmap(arguments, predict_plot)
+
+plots[[1]]
+plots[[2]]
+plots[[3]]
+plots[[4]]
+plots[[5]]
+plots[[6]]
+
+
+ggsave(here("Script", "for_paper", "figure", "Pneumococca_n_18to64_feb.pdf"), plot = plots[[1]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Pneumococca_n_65.pdf_feb.pdf"), plot = plots[[2]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Aspiration_n_18to64_feb.pdf"), plot = plots[[3]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Aspiration_n_65_feb.pdf"), plot = plots[[4]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Influenza_n_18to64_feb.pdf"), plot = plots[[5]], dpi = 300, width = 6, height = 6*0.5)
+ggsave(here("Script", "for_paper", "figure", "Influenza_n_65_feb.pdf"), plot = plots[[6]], dpi = 300, width = 6, height = 6*0.5)
+
+
+```

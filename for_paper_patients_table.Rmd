@@ -1,0 +1,528 @@
+---
+title: "Analysis for Monthly hospitalizaions (Table)"
+subtitle: "with Dr.Tashiro and Dr.Endo"
+author: "Shuntaro Sato"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  minidown::mini_document:
+    framework: sakura
+    theme: default
+    toc: true
+    toc_float: true
+    toc_highlight: true
+    number_section: true
+    code_folding:
+      source: hide
+      output: show
+      message: hide
+      warning: hide
+      error: hide
+---
+
+    
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = FALSE)
+
+library(pacman)
+pacman::p_load(tidyverse, tidylog, gtsummary, gt, tibbletime, lubridate, here, flextable,
+               tsModel,    # harmonic function
+               forecast,    # check residuals
+               scales
+               )
+here::i_am("Script/for_paper/for_paper_patients_table.Rmd")
+```
+
+# Import data
+
+```{r import}
+dbl01 <- 
+  # read_rds("data_long_for_paper_211114.rds") %>%
+  read_rds(here("Script", "for_paper", "data_long_for_paper_220311.rds")) %>%
+  as_tbl_time(index = date_hospitalization) %>%
+  filter(agecat %in% c("18 <= age <= 64", "age >= 65")) %>%
+  filter(disease %in% c("Pneumonia", "Pneumococcal pneumonia", "Aspiration pneumonia",
+                        "Influenza pneumonia", "Pyelonephritis", "Biliary tract infections")) %>%
+  mutate(agecat = fct_drop(agecat),
+         disease = fct_drop(disease))
+```
+
+
+
+# Results
+
+## Impact of behavior change on each infection
+
+```{r}
+# Create data
+dbl02 <- dbl01 %>%
+  filter(disease %in% c("Pneumonia", "Pyelonephritis", "Biliary tract infections")) %>%
+  distinct(HospDmyCd, PtDmyCd, nyuseqno, ym, .keep_all=TRUE)
+
+dbl03 <- dbl02 %>%
+  group_by(disease, date_hospitalization) %>%
+  summarise(n = sum(onset), .groups = "drop") %>%
+  mutate(n = if_else(is.na(n) == TRUE, 0, n)) %>%
+  group_by(disease) %>%
+  arrange(disease, date_hospitalization) %>%
+  mutate(
+    time = 0:(length(n) - 1),
+    cut2 = if_else(date_hospitalization < as.Date("2020-02-01"), 0, 1),
+    time_after_cut2 = if_else(date_hospitalization <= as.Date("2020-02-01"), 0, month(date_hospitalization) - 2),
+    cut3 = if_else(date_hospitalization < as.Date("2020-03-01"), 0, 1),
+    time_after_cut3 = if_else(date_hospitalization <= as.Date("2020-03-01"), 0, month(date_hospitalization) - 3),
+    cut4 = if_else(date_hospitalization < as.Date("2020-04-01"), 0, 1),
+    time_after_cut4 = if_else(date_hospitalization <= as.Date("2020-04-01"), 0, month(date_hospitalization) - 4),
+    feb = if_else(month(date_hospitalization) == 2, 1, 0),
+    log_n = log(n)    # for change rate
+    ) %>%
+  ungroup()
+```
+
+### Change rate level: the number of hospitalized patients
+```{r}
+# Segmented regression analysis
+model_log_null <- dbl03 %>%
+  group_nest(disease) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log2 <- dbl03 %>%
+  group_nest(disease) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut2 + time_after_cut2 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log3 <- dbl03 %>%
+  group_nest(disease) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut3 + time_after_cut3 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log4 <- dbl03 %>%
+  group_nest(disease) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut4 + time_after_cut4 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+```
+
+
+
+#### February 2020.
+```{r}
+model_log2 %>%
+  select(disease, result) %>%
+  unnest(cols = result) %>%
+  select(disease, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut2")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Disease", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:3){
+  checkresiduals(model_log2$model[[i]])
+}
+```
+
+
+#### March 2020
+```{r}
+model_log3 %>%
+  select(disease, result) %>%
+  unnest(cols = result) %>%
+  select(disease, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut3")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Disease", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:3){
+  checkresiduals(model_log3$model[[i]])
+}
+```
+
+#### April 2020
+```{r}
+model_log4 %>%
+  select(disease, result) %>%
+  unnest(cols = result) %>%
+  select(disease, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut4")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Disease", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:3){
+  checkresiduals(model_log4$model[[i]])
+}
+```
+
+
+
+
+
+## Impact of behavior change on pneumonia stratified by age
+```{r}
+# Create data
+dbl02 <- dbl01 %>%
+  filter(disease %in% c("Pneumonia")) %>%
+  distinct(HospDmyCd, PtDmyCd, nyuseqno, ym, .keep_all=TRUE)
+
+dbl03 <- dbl02 %>%
+  group_by(agecat, date_hospitalization) %>%
+  summarise(n = sum(onset),
+            n_death_30 = sum(death_30, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(n = if_else(is.na(n) == TRUE, 0, n),
+         n_death_30 = if_else(is.na(n_death_30) == TRUE, 0, n_death_30)) %>%
+  group_by(agecat) %>%
+  arrange(agecat, date_hospitalization) %>%
+  mutate(
+    time = 0:(length(n) - 1),
+    cut2 = if_else(date_hospitalization < as.Date("2020-02-01"), 0, 1),
+    time_after_cut2 = if_else(date_hospitalization <= as.Date("2020-02-01"), 0, month(date_hospitalization) - 2),
+    cut3 = if_else(date_hospitalization < as.Date("2020-03-01"), 0, 1),
+    time_after_cut3 = if_else(date_hospitalization <= as.Date("2020-03-01"), 0, month(date_hospitalization) - 3),
+    cut4 = if_else(date_hospitalization < as.Date("2020-04-01"), 0, 1),
+    time_after_cut4 = if_else(date_hospitalization <= as.Date("2020-04-01"), 0, month(date_hospitalization) - 4),
+    feb = if_else(month(date_hospitalization) == 2, 1, 0),
+    log_n = log(n),    # for change rate
+    log_n_death_30 = log(n_death_30),
+    prop_death_30 = log((n_death_30/n) * 100)
+    ) %>%
+  ungroup()
+```
+
+### Change rate level: the number of hospitalized patients
+```{r}
+# Segmented regression analysis
+model_log_null <- dbl03 %>%
+  group_nest(agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log2 <- dbl03 %>%
+  group_nest(agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut2 + time_after_cut2 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log3 <- dbl03 %>%
+  group_nest(agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut3 + time_after_cut3 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log4 <- dbl03 %>%
+  group_nest(agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut4 + time_after_cut4 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+```
+
+#### February 2020
+```{r}
+model_log2 %>%
+  select(agecat, result) %>%
+  unnest(cols = result) %>%
+  select(agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut2")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:2){
+  print(i)
+  print(checkresiduals(model_log2$model[[i]]))
+}
+```
+
+#### March 2020.
+```{r}
+model_log3 %>%
+  select(agecat, result) %>%
+  unnest(cols = result) %>%
+  select(agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut3")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:2){
+  print(i)
+  print(checkresiduals(model_log3$model[[i]]))
+}
+```
+
+#### April 2020
+```{r}
+model_log4 %>%
+  select(agecat, result) %>%
+  unnest(cols = result) %>%
+  select(agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut4")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(0, 1, 1, 1, 5),
+    col.names = c("Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:2){
+  print(i)
+  print(checkresiduals(model_log4$model[[i]]))
+}
+```
+
+
+
+
+## Impact of behavior change on different type of pneumonia stratified by age
+
+```{r}
+# ダミーデータ作成
+disease <- fct_relevel(
+  c(
+    "Pneumococcal pneumonia",
+    "Aspiration pneumonia",
+    "Influenza pneumonia"
+  ),
+  "Pneumococcal pneumonia",
+  "Aspiration pneumonia",
+  "Influenza pneumonia"
+)
+date_hospitalization <- seq(from = as.Date("2015-04-01"), to = as.Date("2020-08-01"), by = "month")
+
+agecat <- fct_relevel(c("18 <= age <= 64", "age >= 65"), "18 <= age <= 64", "age >= 65")
+
+temp <- as_tibble(expand.grid(
+  disease = disease,
+  date_hospitalization = date_hospitalization,
+  agecat = agecat
+)) %>%
+  as_tbl_time(index = date_hospitalization)
+
+
+# Create data
+dbl02 <- dbl01 %>%
+  filter(disease %in% c("Pneumococcal pneumonia",
+                        "Aspiration pneumonia",
+                        "Influenza pneumonia")) %>%
+  filter(agecat %in% c("18 <= age <= 64", "age >= 65"))
+
+dbl03 <- dbl02 %>%
+  group_by(disease, agecat, date_hospitalization) %>%
+  summarise(n = sum(onset),
+            n_death_30 = sum(death_30, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(n = if_else(is.na(n) == TRUE, 0, n),
+         n_death_30 = if_else(is.na(n_death_30) == TRUE, 0, n_death_30)) %>%
+  right_join(temp, by = c("disease", "agecat", "date_hospitalization")) %>%
+  group_by(disease, agecat) %>%
+  arrange(disease, agecat, date_hospitalization) %>%
+  filter(!disease %in% c("Healthcare-associated pneumonia", "Community-acquired pneumonia") | (!date_hospitalization >= as.Date("2015-04-01") | !date_hospitalization <= as.Date("2018-03-01"))) %>%
+  mutate(
+    time = 0:(length(n) - 1),
+    cut2 = if_else(date_hospitalization < as.Date("2020-02-01"), 0, 1),
+    time_after_cut2 = if_else(date_hospitalization <= as.Date("2020-02-01"), 0, month(date_hospitalization) - 2),
+    cut3 = if_else(date_hospitalization < as.Date("2020-03-01"), 0, 1),
+    time_after_cut3 = if_else(date_hospitalization <= as.Date("2020-03-01"), 0, month(date_hospitalization) - 3),
+    cut4 = if_else(date_hospitalization < as.Date("2020-04-01"), 0, 1),
+    time_after_cut4 = if_else(date_hospitalization <= as.Date("2020-04-01"), 0, month(date_hospitalization) - 4),
+    feb = if_else(month(date_hospitalization) == 2, 1, 0),
+    log_n = if_else(is.na(n) == TRUE, log(1), log(n)),    # for change rate
+    n_death_30 = if_else(is.na(n_death_30) == TRUE, 0, n_death_30)
+    ) %>%
+  ungroup()
+```
+
+### Change rate level: the number of hospitalized patients
+```{r}
+# Segmented regression analysis
+model_log_null <- dbl03 %>%
+  group_nest(disease, agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log2 <- dbl03 %>%
+  group_nest(disease, agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut2 + time_after_cut2 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log3 <- dbl03 %>%
+  group_nest(disease, agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut3 + time_after_cut3 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+
+model_log4 <- dbl03 %>%
+  group_nest(disease, agecat) %>%
+  mutate(
+    model = map(data, ~ lm(log_n ~ time + cut4 + time_after_cut4 + harmonic(time, 2, 12), data = .x)),
+    result = map(model, broom::tidy, conf.int = TRUE),
+    aic = map(model, broom::glance)
+)
+```
+
+
+#### February 2020.
+```{r}
+model_log2 %>%
+  select(disease, agecat, result) %>%
+  unnest(cols = result) %>%
+  select(disease, agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut2")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  arrange(agecat, disease) %>%
+  knitr::kable("simple",
+    digits = c(0, 0, 1, 1, 1, 5),
+    col.names = c("Disease", "Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:6){
+  print(model_log2$disease[[i]])
+  print(model_log2$agecat[[i]])
+  print(checkresiduals(model_log2$model[[i]]))
+}
+```
+
+#### March 2020
+```{r}
+model_log3 %>%
+  select(disease, agecat, result) %>%
+  unnest(cols = result) %>%
+  select(disease, agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut3")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  arrange(agecat, disease) %>%
+  knitr::kable("simple",
+    digits = c(0, 0, 1, 1, 1, 5),
+    col.names = c("Disease", "Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:6){
+  print(model_log3$disease[[i]])
+  print(model_log3$agecat[[i]])
+  print(checkresiduals(model_log4$model[[i]]))
+}
+```
+
+
+#### April 2020
+```{r}
+model_log4 %>%
+  select(disease, agecat, result) %>%
+  unnest(cols = result) %>%
+  select(disease, agecat, term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("cut4")) %>%
+  select(-term) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  arrange(agecat, disease) %>%
+  knitr::kable("simple",
+    digits = c(0, 0, 1, 1, 1, 5),
+    col.names = c("Disease", "Age", "Estimate", "CI.low", "CI.high", "P")
+  )
+```
+
+```{r}
+for (i in 1:6){
+  print(model_log4$disease[[i]])
+  print(model_log4$agecat[[i]])
+  print(checkresiduals(model_log4$model[[i]]))
+}
+```

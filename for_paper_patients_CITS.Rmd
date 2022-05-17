@@ -1,0 +1,156 @@
+---
+title: "Controlled ITS for the number of patients"
+subtitle: "with Dr.Tashiro and Dr.Endo"
+author: "Shuntaro Sato"
+date: "`r format(Sys.time(), '%Y-%m-%d')`"
+output:
+  minidown::mini_document:
+    framework: sakura
+    theme: default
+    toc: true
+    toc_float: true
+    toc_highlight: true
+    number_section: true
+    code_folding:
+      source: hide
+      output: show
+      message: hide
+      warning: hide
+      error: hide
+---
+
+    
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = FALSE)
+
+library(pacman)
+pacman::p_load(tidyverse, gtsummary, gt, tibbletime, lubridate, here, flextable,
+               tsModel,    # harmonic function
+               forecast,    # check residuals
+               scales
+               )
+here::i_am("Script/for_paper/for_paper_patients_CITS.Rmd")
+```
+
+# Import data
+
+```{r import}
+dbl01 <- 
+  # read_rds("data_long_for_paper_220311.rds") %>%
+  read_rds(here("Script", "for_paper", "data_long_for_paper_220311.rds")) %>%
+  as_tbl_time(index = date_hospitalization) %>%
+  filter(agecat %in% c("18 <= age <= 64", "age >= 65")) %>%
+  filter(disease %in% c("Pneumonia", "Pneumococcal pneumonia", "Aspiration pneumonia",
+                        "Influenza pneumonia", "Health care associated pneumonia", "Community acquired pneumonia",
+                        "Pyelonephritis", "Biliary tract infections")) %>%
+  mutate(agecat = fct_drop(agecat),
+         disease = fct_drop(disease))
+```
+
+
+
+# Results
+
+```{r}
+# Create data
+dbl02 <- dbl01 %>%
+  filter(disease %in% c("Pneumonia", "Pyelonephritis", "Biliary tract infections")) %>%
+  distinct(HospDmyCd, PtDmyCd, nyuseqno, ym, .keep_all=TRUE)
+
+dbl03 <- dbl02 %>%
+  group_by(disease, date_hospitalization) %>%
+  summarise(n = sum(onset), .groups = "drop") %>%
+  mutate(n = if_else(is.na(n) == TRUE, 0, n)) %>%
+  group_by(disease) %>%
+  arrange(disease, date_hospitalization) %>%
+  mutate(
+    time = 0:(length(n) - 1),
+    cut2 = if_else(date_hospitalization < as.Date("2020-02-01"), 0, 1),
+    time_after_cut2 = if_else(date_hospitalization <= as.Date("2020-02-01"), 0, month(date_hospitalization) - 2),
+    log_n = log(n)    # for change rate
+    ) %>%
+  ungroup()
+```
+
+
+### Controlled interrupted time series
+#### Pneumonia vs Pyelonephritis
+```{r}
+dbl03_pne_pye <- dbl03 %>%
+  filter(disease %in% c("Pneumonia", "Pyelonephritis")) %>%
+  mutate(group = if_else(disease == "Pneumonia", 1, 0),
+         group_time = group * time,
+         group_cut2 = group * cut2,
+         group_time_after_cut2 = group * time_after_cut2)
+
+
+model_cits_pne_pye <- lm(log_n ~ time + cut2 + time_after_cut2 +
+                           group + group_time + group_cut2 + group_time_after_cut2 +
+                           harmonic(time, 2, 12) + group:harmonic(time, 2, 12), data = dbl03_pne_pye)
+
+
+model_cits_pne_pye %>%
+  broom::tidy(conf.int = TRUE) %>%
+  filter(term %in% c("cut2", "group_cut2")) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(1, 1, 1, 1, 5),
+    col.names = c("Term", "Estimate", "CI.low", "CI.high", "P")
+  )
+
+pred_pne_pye <- predict(model_cits_pne_pye, newdata = dbl03_pne_pye)
+
+db_plot_pne_pye <- dbl03_pne_pye %>%
+  mutate(pred = pred_pne_pye)
+
+ggplot(data = db_plot_pne_pye) +
+  aes(x = date_hospitalization) +
+  geom_point(aes(y = n, color = factor(group))) +
+  geom_line(aes(y = exp(pred), color = factor(group), group = factor(group)))
+```
+
+#### Pneumonia vs Biliary tract infections
+```{r}
+dbl03_pne_cho <- dbl03 %>%
+  filter(disease %in% c("Pneumonia", "Biliary tract infections")) %>%
+  mutate(group = if_else(disease == "Pneumonia", 1, 0),
+         group_time = group * time,
+         group_cut2 = group * cut2,
+         group_time_after_cut2 = group * time_after_cut2)
+
+
+model_cits_pne_cho <- lm(log_n ~ time + cut2 + time_after_cut2 +
+                           group + group_time + group_cut2 + group_time_after_cut2 +
+                           harmonic(time, 2, 12) + group:harmonic(time, 2, 12), data = dbl03_pne_cho)
+
+
+model_cits_pne_cho %>%
+  broom::tidy(conf.int = TRUE) %>%
+  filter(term %in% c("cut2", "group_cut2")) %>%
+  select(term, estimate, conf.low, conf.high, p.value) %>%
+  mutate(
+    estimate = round(100 * (exp(estimate) - 1), 1),
+    conf.low = round(100 * (exp(conf.low) - 1), 1),
+    conf.high = round(100 * (exp(conf.high) - 1), 1)
+  ) %>%
+  knitr::kable("simple",
+    digits = c(1, 1, 1, 1, 5),
+    col.names = c("Term", "Estimate", "CI.low", "CI.high", "P")
+  )
+
+pred_pne_cho <- predict(model_cits_pne_cho, newdata = dbl03_pne_cho)
+
+db_plot_pne_cho <- dbl03_pne_cho %>%
+  mutate(pred = pred_pne_cho)
+
+ggplot(data = db_plot_pne_cho) +
+  aes(x = date_hospitalization) +
+  geom_point(aes(y = n, color = factor(group))) +
+  geom_line(aes(y = exp(pred), color = factor(group), group = factor(group)))
+```
